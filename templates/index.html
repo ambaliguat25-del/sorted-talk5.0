@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ceb">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sorted Talk - Rider Radio & GPS</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #121212; color: #fff; display: flex; flex-direction: column; height: 100vh; }
+        header { background: #1f1f1f; padding: 10px 15px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; border-bottom: 2px solid #333; gap: 8px; }
+        header h3 { margin: 0; color: #f39c12; font-size: 18px; }
+        .header-inputs { display: flex; gap: 5px; }
+        header input { padding: 6px; border-radius: 4px; border: 1px solid #444; background: #222; color: white; width: 100px; text-align: center; font-size: 12px; }
+        
+        #main-container { display: flex; flex: 1; flex-direction: column; position: relative; }
+        #map { flex: 1; width: 100%; min-height: 250px; }
+        
+        #sidebar { position: absolute; top: 10px; right: 10px; background: rgba(31, 31, 31, 0.9); padding: 10px; border-radius: 8px; width: 180px; z-index: 1000; font-size: 12px; border: 1px solid #444; }
+        #sidebar h4 { margin: 0 0 5px 0; border-bottom: 1px solid #555; padding-bottom: 3px; }
+        .rider-item { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-top: 3px; }
+        .online { background: #2ecc71; }
+        .offline { background: #e74c3c; }
+
+        .controls { background: #1f1f1f; padding: 15px; display: flex; flex-direction: column; align-items: center; gap: 8px; border-top: 2px solid #333; }
+        #ptt-btn { width: 100%; max-width: 320px; padding: 18px; font-size: 18px; font-weight: bold; background: #e74c3c; color: white; border: none; border-radius: 50px; cursor: pointer; text-transform: uppercase; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        #ptt-btn.active { background: #2ecc71; transform: scale(0.98); }
+        #status { font-size: 13px; color: #aaa; }
+        #connect-btn { padding: 6px 12px; background: #f39c12; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; color: #000; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h3>🎙️ Sorted Talk</h3>
+        <div class="header-inputs">
+            <input type="text" id="channel" placeholder="Frequency" value="CHANNEL-1">
+            <input type="text" id="username" placeholder="Imong Ngalan" value="Rider-1">
+            <button id="connect-btn" onclick="joinChannel()">Join</button>
+        </div>
+    </header>
+
+    <div id="main-container">
+        <div id="sidebar">
+            <h4>Team Members</h4>
+            <div id="rider-list">Pindota ang Join sa Frequency</div>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <div class="controls">
+        <div id="status">Status: Wala pa naka-join sa frequency</div>
+        <button id="ptt-btn">Pindota ug I-hold para Magsulti</button>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        let ws;
+        let map;
+        let markers = {};
+        let riderStatuses = {};
+        let mediaRecorder;
+        let isConnected = false;
+
+        const usernameInput = document.getElementById("username");
+        const channelInput = document.getElementById("channel");
+        const pttBtn = document.getElementById("ptt-btn");
+        const statusDiv = document.getElementById("status");
+        const riderListDiv = document.getElementById("rider-list");
+
+        function initMap() {
+            const savedLat = localStorage.getItem('sorted_last_lat') || -43.5321;
+            const savedLon = localStorage.getItem('sorted_last_lon') || 172.6362;
+
+            map = L.map('map').setView([savedLat, savedLon], 14);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap'
+            }).addTo(map);
+
+            if (navigator.geolocation) {
+                navigator.geolocation.watchPosition(position => {
+                    const lat = position.coords.latitude;
+                    const lon = position.coords.longitude;
+
+                    localStorage.setItem('sorted_last_lat', lat);
+                    localStorage.setItem('sorted_last_lon', lon);
+
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "location",
+                            username: usernameInput.value || "Rider",
+                            lat: lat,
+                            lon: lon,
+                            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        }));
+                    }
+                }, error => {
+                    console.log("GPS Error: ", error);
+                }, { enableHighAccuracy: true });
+            }
+        }
+
+        function joinChannel() {
+            if (ws) {
+                ws.close();
+            }
+
+            const username = usernameInput.value || "Rider";
+            const channel = channelInput.value || "CHANNEL-1";
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/${channel}/${username}`);
+
+            ws.onopen = () => {
+                statusDiv.innerText = `Status: Connected sa Frequency [${channel}]`;
+                isConnected = true;
+            };
+
+            ws.onmessage = async (event) => {
+                if (typeof event.data === 'string') {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === "location") {
+                        updateRiderLocation(data.username, data.lat, data.lon, data.time, "online");
+                    } else if (data.type === "status") {
+                        updateRiderStatus(data.username, data.status);
+                    }
+                } else {
+                    const audioBlob = new Blob([event.data], { type: 'audio/webm' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    new Audio(audioUrl).play();
+                }
+            };
+
+            ws.onclose = () => {
+                statusDiv.innerText = "Status: Naputol ang koneksyon sa Frequency";
+                isConnected = false;
+                markAllOffline();
+            };
+        }
+
+        function updateRiderLocation(name, lat, lon, time, status) {
+            riderStatuses[name] = { status: status, time: time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), lat: lat, lon: lon };
+
+            if (markers[name]) {
+                markers[name].setLatLng([lat, lon]);
+                markers[name].getPopup().setContent(`<b>${name}</b><br>Status: Online<br>Huling Pwesto: ${time}`);
+            } else {
+                markers[name] = L.marker([lat, lon]).addTo(map).bindPopup(`<b>${name}</b><br>Status: Online<br>Huling Pwesto: ${time}`);
+            }
+            renderSidebar();
+        }
+
+        function updateRiderStatus(name, status) {
+            if (!riderStatuses[name]) {
+                riderStatuses[name] = { status: status, time: "Karon lang", lat: null, lon: null };
+            } else {
+                riderStatuses[name].status = status;
+            }
+            renderSidebar();
+        }
+
+        function markAllOffline() {
+            for (let name in riderStatuses) {
+                riderStatuses[name].status = "offline";
+            }
+            renderSidebar();
+        }
+
+        function renderSidebar() {
+            let html = "";
+            for (let name in riderStatuses) {
+                let st = riderStatuses[name].status;
+                let dotClass = st === "online" ? "online" : "offline";
+                let timeStr = riderStatuses[name].time || "";
+                html += `<div class="rider-item">
+                    <span>${name} <small style="color:#aaa;">(${timeStr})</small></span>
+                    <span><span class="status-dot ${dotClass}"></span> ${st}</span>
+                </div>`;
+            }
+            riderListDiv.innerHTML = html || "Walay ubang riders";
+        }
+
+        async function setupAudio() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = e => {
+                    if (e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(e.data);
+                    }
+                };
+            } catch (err) {
+                console.log("Mic access error");
+            }
+        }
+
+        pttBtn.addEventListener("mousedown", () => mediaRecorder && mediaRecorder.state === "inactive" && mediaRecorder.start() & pttBtn.classList.add("active") & (pttBtn.innerText = "Nagsulti Na..."));
+        pttBtn.addEventListener("mouseup", () => mediaRecorder && mediaRecorder.state === "recording" && mediaRecorder.stop() & pttBtn.classList.remove("active") & (pttBtn.innerText = "Pindota ug I-hold para Magsulti"));
+        pttBtn.addEventListener("touchstart", (e) => { e.preventDefault(); mediaRecorder && mediaRecorder.state === "inactive" && mediaRecorder.start() & pttBtn.classList.add("active") & (pttBtn.innerText = "Nagsulti Na..."); });
+        pttBtn.addEventListener("touchend", (e) => { e.preventDefault(); mediaRecorder && mediaRecorder.state === "recording" && mediaRecorder.stop() & pttBtn.classList.remove("active") & (pttBtn.innerText = "Pindota ug I-hold para Magsulti"); });
+
+        window.onload = () => {
+            initMap();
+            setupAudio();
+        };
+    </script>
+</body>
+</html>
